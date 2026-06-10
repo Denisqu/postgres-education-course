@@ -13,7 +13,7 @@ from rich.table import Table
 
 from console import console, render_error
 from db import get_conn
-from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PriceValidator,
+from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PriceValidator
 from commands import command, CATEGORY_WAREHOUSES
 
 
