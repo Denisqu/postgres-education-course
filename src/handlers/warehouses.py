@@ -107,7 +107,7 @@ def show_warehouse(_id: str) -> None:
 def isCentralWarehouseExists() -> bool:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-        cur.execute("SELECT * FROM catalog.warehouses WHERE is_central = True")
+        cur.execute("SELECT * FROM catalog.warehouses")
         warehouse: Warehouse | None = cur.fetchone()
     if warehouse is None:
         return False
@@ -126,29 +126,24 @@ def isCentralWarehouseExistsWithDifferentId(_id: str) -> bool:
 def add_warehouse() -> None:
     conn = get_conn()
 
-    with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-        cur.execute("SELECT * FROM catalog.warehouses WHERE is_central = True")
-        central_warehouses: list[Warehouse] = cur.fetchall()
-
     city = prompt("Город: ", validator=city_validator, completer=city_completer).strip()
     address = prompt("Адрес: ", validator=NonEmptyValidator()).strip()
     label = prompt("Метка (необязательно): ").strip() or None
     is_central = True
     is_need_change_central_warehouse = False
-    if len(central_warehouses) > 0:
+    if isCentralWarehouseExists():
         is_central = YesNoValidator.is_yes(prompt("Центральный склад уже существует. Сделать новый склад центральным? ",
                             validator=YesNoValidator())
                       .strip())
         is_need_change_central_warehouse = is_central
 
     if is_need_change_central_warehouse:
-        for old_central_warehouse in central_warehouses:
-            with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-                cur.execute("""
-                    UPDATE catalog.warehouses 
-                    SET is_central = False 
-                    WHERE id = %s
-                """, (old_central_warehouse.id,))
+        with conn.cursor(row_factory=class_row(Warehouse)) as cur:
+            cur.execute("""
+                UPDATE catalog.warehouses 
+                SET is_central = False 
+                WHERE is_central
+            """)
 
     conn.execute(
         "INSERT INTO catalog.warehouses (city, address, label, is_central) VALUES (%s, %s, %s, %s)",
