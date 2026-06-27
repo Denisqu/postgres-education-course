@@ -67,7 +67,7 @@ def _get_order_items(order_id: int) -> list[OrderItem]:
             FROM sales.order_items oi
             JOIN catalog.products p ON p.id = oi.product_id
             WHERE oi.order_id = %s
-            ORDER BY oi.id
+            ORDER BY p.name
         """, (order_id,))
         return cur.fetchall()
 
@@ -113,7 +113,6 @@ def _render_order_items(items: list[OrderItem]) -> None:
         return
 
     table = Table(title="Позиции заказа", show_header=True, header_style="bold cyan")
-    table.add_column("ID", style="dim", width=6, justify="right")
     table.add_column("Товар", style="green", min_width=20)
     table.add_column("Цена", style="yellow", justify="right")
     table.add_column("Кол-во", style="magenta", justify="right")
@@ -121,7 +120,6 @@ def _render_order_items(items: list[OrderItem]) -> None:
 
     for item in items:
         table.add_row(
-            str(item.id),
             item.product_name,
             f"{item.price:.2f}",
             str(item.quantity),
@@ -417,7 +415,7 @@ def _prompt_order_item_choice(order_id: int) -> OrderItem | None:
         return None
 
     choices = [
-        f"{it.id} | {it.product_name} | {it.price:.2f} × {it.quantity}"
+        f"{it.product_name} | {it.price:.2f} × {it.quantity}"
         for it in items
     ]
     completer = WordCompleter(choices, ignore_case=True, sentence=True)
@@ -492,12 +490,15 @@ def edit_order_item(order_id: str) -> None:
 
     conn = get_conn()
     conn.execute(
-        "UPDATE sales.order_items SET quantity = %s WHERE id = %s",
-        (new_quantity, item.id),
+        """
+        UPDATE sales.order_items 
+        SET quantity = %s 
+        WHERE order_id = %s AND product_id = %s
+        """,
+        (new_quantity, order_id, item.product_id),
     )
     _recalculate_total(int(order_id))
-    console.print(f"[green]Позиция #{item.id} обновлена: количество = {new_quantity}.[/green]")
-
+    console.print(f"[green]Позиция '{item.product_name}' обновлена: количество = {new_quantity}.[/green]")
 
 @command("delete order_item", "удалить позицию из заказа", CATEGORY_ORDERS)
 def delete_order_item(order_id: str) -> None:
@@ -514,6 +515,12 @@ def delete_order_item(order_id: str) -> None:
     answer = prompt("Удалить эту позицию? (y/n, д/н): ", validator=YesNoValidator())
     if YesNoValidator.is_yes(answer):
         conn = get_conn()
-        conn.execute("DELETE FROM sales.order_items WHERE id = %s", (item.id,))
+        conn.execute(
+            """
+            DELETE FROM sales.order_items 
+            WHERE order_id = %s AND product_id = %s
+            """,
+            (order_id, item.product_id),
+        )
         _recalculate_total(int(order_id))
-        console.print(f"[green]Позиция #{item.id} удалена.[/green]")
+        console.print(f"[green]Позиция '{item.product_name}' удалена.[/green]")
