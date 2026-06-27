@@ -12,10 +12,6 @@ from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PositiveIntValidator
 from commands import command, CATEGORY_ORDERS
 
-# ------------------------------------------------------------
-# Константы и валидаторы
-# ------------------------------------------------------------
-
 ORDER_STATUSES = [
     "unpublished", "new", "processing", "pending", "packing", "shipped"
 ]
@@ -23,7 +19,6 @@ status_validator = ChoiceValidator(
     ORDER_STATUSES,
     message=f"Статус должен быть одним из: {', '.join(ORDER_STATUSES)}",
 )
-
 
 @dataclass
 class Order:
@@ -171,9 +166,7 @@ def _prompt_product_choice(
         choices,
         message="Выберите товар из списка. Используйте Tab для автодополнения.",
     )
-
     raw = prompt("Товар: ", completer=completer, validator=validator).strip()
-
     # Найти выбранный товар по индексу в отфильтрованном списке
     try:
         idx = choices.index(raw)
@@ -181,14 +174,8 @@ def _prompt_product_choice(
     except ValueError:
         return None
 
-
-# ------------------------------------------------------------
-# Интерактивное добавление позиций заказа
-# ------------------------------------------------------------
-
 def _add_items_interactively(order_id: int) -> None:
     """Цикл добавления товаров в заказ до отказа пользователя."""
-    # TODO: При выборе продукта в order_item следует дать возможность пользователю выбрать продукт с помощью автокомплита. Все-таки потенциально продуктов может быть много, поэтому выбирать из списка не совсем корректно с точки зрения UX.
     products = _get_all_products()
     if not products:
         console.print("[yellow]Каталог товаров пуст. Добавьте товары перед созданием заказа.[/yellow]")
@@ -225,11 +212,6 @@ def _add_items_interactively(order_id: int) -> None:
         more = prompt("Добавить ещё товар? (y/n, д/н): ", validator=YesNoValidator()).strip()
         if not YesNoValidator.is_yes(more):
             break
-
-
-# ------------------------------------------------------------
-# CRUD: Orders
-# ------------------------------------------------------------
 
 @command("list orders", "список всех заказов", CATEGORY_ORDERS)
 def list_orders() -> None:
@@ -302,7 +284,6 @@ def add_order() -> None:
     if YesNoValidator.is_yes(add_now):
         _add_items_interactively(new_order_id)
 
-    # Финальный вывод
     order = _get_order_or_fail(str(new_order_id))
     if order:
         _render_order(order)
@@ -402,10 +383,6 @@ def publish_order(order_id: str) -> None:
     )
     console.print(f"[green]Заказ #{order_id} опубликован (статус: new).[/green]")
 
-
-# ------------------------------------------------------------
-# CRUD: Order Items
-# ------------------------------------------------------------
 
 def _prompt_order_item_choice(order_id: int) -> OrderItem | None:
     """Выбор позиции заказа через prompt_toolkit choice."""
