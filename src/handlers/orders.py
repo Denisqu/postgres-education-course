@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from datetime import datetime
 
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import WordCompleter
@@ -10,14 +9,20 @@ from rich.table import Table
 
 from console import console, render_error
 from db import get_conn
-from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
+from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PositiveIntValidator
 from commands import command, CATEGORY_ORDERS
-from handlers.warehouses import Warehouse
 
+# ------------------------------------------------------------
+# Константы и валидаторы
+# ------------------------------------------------------------
 
-ORDER_STATUSES = ['unpublished', 'new', 'processing', 'pending', 'packing', 'shipped']
-status_completer = WordCompleter(ORDER_STATUSES, ignore_case=True)
-status_validator = ChoiceValidator(ORDER_STATUSES, message="Статус должен быть из списка. Используйте Tab.")
+ORDER_STATUSES = [
+    "unpublished", "new", "processing", "pending", "packing", "shipped"
+]
+status_validator = ChoiceValidator(
+    ORDER_STATUSES,
+    message=f"Статус должен быть одним из: {', '.join(ORDER_STATUSES)}",
+)
 
 
 @dataclass
@@ -25,9 +30,16 @@ class Order:
     id: int
     status: str
     total_amount: Decimal
-    created_at: datetime
+    created_at: str
     warehouse_id: int
 
+@dataclass
+class OrderItem:
+    order_id: int
+    product_id: int
+    product_name: str
+    price: Decimal
+    quantity: int
 
 @dataclass
 class Product:
@@ -35,108 +47,54 @@ class Product:
     sku: str
     name: str
     price: Decimal
-    category_id: int
 
 
-def get_warehouses():
+def _get_all_products() -> list[Product]:
+    """Получить все товары из каталога."""
     conn = get_conn()
-    with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-        cur.execute("SELECT * FROM catalog.warehouses")
+    with conn.cursor(row_factory=class_row(Product)) as cur:
+        cur.execute("SELECT id, sku, name, price FROM catalog.products ORDER BY name")
         return cur.fetchall()
 
 
-def _recalculate_order_total(conn, order_id: int) -> None:
-    with conn.cursor() as cur:
+def _get_order_items(order_id: int) -> list[OrderItem]:
+    """Получить позиции заказа с названиями товаров."""
+    conn = get_conn()
+    with conn.cursor(row_factory=class_row(OrderItem)) as cur:
         cur.execute("""
-            SELECT COALESCE(SUM(p.price), 0)
+            SELECT oi.order_id, oi.product_id,
+                   p.name AS product_name, oi.price, oi.quantity
             FROM sales.order_items oi
-            JOIN catalog.products p ON oi.product_id = p.id
+            JOIN catalog.products p ON p.id = oi.product_id
             WHERE oi.order_id = %s
+            ORDER BY oi.id
         """, (order_id,))
-        total = cur.fetchone()[0]
-
-    conn.execute("""
-        UPDATE sales.orders SET total_amount = %s WHERE id = %s
-    """, (total, order_id))
+        return cur.fetchall()
 
 
-def _add_order_item_interactive(conn, order_id: int) -> None:
-    with conn.cursor() as cur:
-        cur.execute("SELECT product_id FROM sales.order_items WHERE order_id = %s", (order_id,))
-        existing_ids = {row[0] for row in cur.fetchall()}
-
-    with conn.cursor(row_factory=class_row(Product)) as cur:
-        cur.execute("SELECT * FROM catalog.products")
-        all_products = cur.fetchall()
-
-    available_products = [p for p in all_products if p.id not in existing_ids]
-
-    if not available_products:
-        console.print("[yellow]Все товары уже добавлены в этот заказ или в каталоге нет товаров.[/yellow]")
-        return
-
-    sku_to_product = {p.sku: p for p in available_products}
-    skus = list(sku_to_product.keys())
-
-    sku_completer = WordCompleter(skus, ignore_case=True)
-    sku_validator = ChoiceValidator(skus, message="Артикул должен быть из списка. Используйте Tab.")
-
-    # TODO: в промпте не использовать id товара, а его наименование. id использовать только в SQL
-    sku = prompt("Артикул товара: ", validator=sku_validator, completer=sku_completer).strip()
-    product = sku_to_product[sku]
-
-    conn.execute("""
-        INSERT INTO sales.order_items (order_id, product_id) VALUES (%s, %s)
-    """, (order_id, product.id))
-
-    console.print(f"[green]Товар '{product.name}' (ID: {product.id}) добавлен в заказ #{order_id}.[/green]")
-
-
-@command("list orders", "список всех заказов", CATEGORY_ORDERS)
-def list_orders() -> None:
+def _recalculate_total(order_id: int) -> None:
+    """Пересчитать total_amount заказа на основе его позиций."""
     conn = get_conn()
-    table = Table(title="Заказы", show_header=True, header_style="bold cyan")
-
-    table.add_column("ID", style="dim", width=6, justify="right")
-    table.add_column("Статус", style="green", min_width=15)
-    table.add_column("Сумма", style="yellow", min_width=10, justify="right")
-    table.add_column("Создан", style="magenta", min_width=20)
-    table.add_column("Склад ID", style="white", min_width=10, justify="right")
-
-    with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders ORDER BY id")
-        orders: list[Order] = cur.fetchall()
-
-    for order in orders:
-        table.add_row(
-            str(order.id),
-            order.status,
-            str(order.total_amount),
-            order.created_at.strftime("%Y-%m-%d %H:%M"),
-            str(order.warehouse_id)
+    conn.execute("""
+        UPDATE sales.orders
+        SET total_amount = COALESCE(
+            (SELECT SUM(price * quantity) FROM sales.order_items WHERE order_id = %s),
+            0
         )
-    console.print(table)
+        WHERE id = %s
+    """, (order_id, order_id))
 
 
-@command("show order", "информация о заказе", CATEGORY_ORDERS)
-def show_order(_id: str) -> None:
-    conn = get_conn()
-    with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders WHERE id = %s", (_id,))
-        order: Order | None = cur.fetchone()
-
-    if order is None:
-        render_error(f"Заказ с ID {_id} не найден")
-        return
-
+def _render_order(order: Order) -> None:
+    """Красивый вывод информации о заказе."""
     table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column("Поле", style="bold cyan", width=15)
+    table.add_column("Поле", style="bold cyan", width=18)
     table.add_column("Значение", style="white")
 
     table.add_row("ID", str(order.id))
-    table.add_row("Статус", order.status)
-    table.add_row("Сумма", str(order.total_amount))
-    table.add_row("Создан", order.created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    table.add_row("Статус", f"[bold]{order.status}[/bold]")
+    table.add_row("Сумма", f"{order.total_amount:.2f}")
+    table.add_row("Создан", str(order.created_at))
     table.add_row("Склад ID", str(order.warehouse_id))
 
     panel = Panel(
@@ -147,224 +105,415 @@ def show_order(_id: str) -> None:
     )
     console.print(panel)
 
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT oi.product_id, p.name, p.sku, p.price 
-            FROM sales.order_items oi
-            JOIN catalog.products p ON oi.product_id = p.id
-            WHERE oi.order_id = %s
-        """, (_id,))
-        items = cur.fetchall()
 
-    if items:
-        items_table = Table(title="Товары в заказе", show_header=True, header_style="bold cyan")
-        items_table.add_column("ID товара", justify="right")
-        items_table.add_column("Артикул")
-        items_table.add_column("Название")
-        items_table.add_column("Цена", justify="right")
-        for item in items:
-            items_table.add_row(str(item[0]), item[2], item[1], str(item[3]))
-        console.print(items_table)
-    else:
+def _render_order_items(items: list[OrderItem]) -> None:
+    """Вывод позиций заказа в виде таблицы."""
+    if not items:
         console.print("[yellow]В заказе нет товаров.[/yellow]")
+        return
+
+    table = Table(title="Позиции заказа", show_header=True, header_style="bold cyan")
+    table.add_column("ID", style="dim", width=6, justify="right")
+    table.add_column("Товар", style="green", min_width=20)
+    table.add_column("Цена", style="yellow", justify="right")
+    table.add_column("Кол-во", style="magenta", justify="right")
+    table.add_column("Сумма", style="bold white", justify="right")
+
+    for item in items:
+        table.add_row(
+            str(item.id),
+            item.product_name,
+            f"{item.price:.2f}",
+            str(item.quantity),
+            f"{item.price * item.quantity:.2f}",
+        )
+    console.print(table)
+
+
+def _get_order_or_fail(order_id: str) -> Order | None:
+    """Получить заказ по ID или вывести ошибку."""
+    conn = get_conn()
+    with conn.cursor(row_factory=class_row(Order)) as cur:
+        cur.execute("SELECT * FROM sales.orders WHERE id = %s", (order_id,))
+        order: Order | None = cur.fetchone()
+
+    if order is None:
+        render_error(f"Заказ с ID {order_id} не найден")
+    return order
+
+
+def _check_editable(order: Order, action: str) -> bool:
+    """Проверить, можно ли редактировать/удалять заказ."""
+    if order.status != "unpublished":
+        render_error(
+            f"Нельзя {action} заказ в статусе '{order.status}'. "
+            f"Редактирование и удаление разрешены только для статуса 'unpublished'."
+        )
+        return False
+    return True
+
+
+def _prompt_product_choice(
+    products: list[Product],
+    exclude_ids: set[int],
+) -> Product | None:
+    """
+    Интерактивный выбор товара с автокомплитом.
+    Исключает товары, уже добавленные в заказ.
+    """
+    available = [p for p in products if p.id not in exclude_ids]
+    if not available:
+        render_error("Нет доступных товаров для добавления (все уже в заказе или каталог пуст).")
+        return None
+
+    # Автокомплит по "SKU | Название | Цена"
+    choices = [f"{p.name} ({p.sku}, {p.price:.2f})" for p in available]
+    completer = WordCompleter(choices, ignore_case=True, sentence=True)
+    validator = ChoiceValidator(
+        choices,
+        message="Выберите товар из списка. Используйте Tab для автодополнения.",
+    )
+
+    raw = prompt("Товар: ", completer=completer, validator=validator).strip()
+
+    # Найти выбранный товар по индексу в отфильтрованном списке
+    try:
+        idx = choices.index(raw)
+        return available[idx]
+    except ValueError:
+        return None
+
+
+# ------------------------------------------------------------
+# Интерактивное добавление позиций заказа
+# ------------------------------------------------------------
+
+def _add_items_interactively(order_id: int) -> None:
+    """Цикл добавления товаров в заказ до отказа пользователя."""
+    # TODO: При выборе продукта в order_item следует дать возможность пользователю выбрать продукт с помощью автокомплита. Все-таки потенциально продуктов может быть много, поэтому выбирать из списка не совсем корректно с точки зрения UX.
+    products = _get_all_products()
+    if not products:
+        console.print("[yellow]Каталог товаров пуст. Добавьте товары перед созданием заказа.[/yellow]")
+        return
+
+    while True:
+        existing = _get_order_items(order_id)
+        exclude_ids = {item.product_id for item in existing}
+
+        console.print("\n[bold cyan]Добавление товара в заказ[/bold cyan]")
+        product = _prompt_product_choice(products, exclude_ids)
+        if product is None:
+            break
+
+        quantity_str = prompt(
+            "Количество: ",
+            validator=PositiveIntValidator(),
+        ).strip()
+        quantity = int(quantity_str)
+
+        conn = get_conn()
+        conn.execute(
+            """
+            INSERT INTO sales.order_items (order_id, product_id, price, quantity)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (order_id, product.id, product.price, quantity),
+        )
+        _recalculate_total(order_id)
+        console.print(
+            f"[green]Добавлено: {product.name} × {quantity} по {product.price:.2f}[/green]"
+        )
+
+        more = prompt("Добавить ещё товар? (y/n, д/н): ", validator=YesNoValidator()).strip()
+        if not YesNoValidator.is_yes(more):
+            break
+
+
+# ------------------------------------------------------------
+# CRUD: Orders
+# ------------------------------------------------------------
+
+@command("list orders", "список всех заказов", CATEGORY_ORDERS)
+def list_orders() -> None:
+    conn = get_conn()
+    table = Table(title="Заказы", show_header=True, header_style="bold cyan")
+
+    table.add_column("ID", style="dim", width=6, justify="right")
+    table.add_column("Статус", style="magenta", min_width=15)
+    table.add_column("Сумма", style="yellow", justify="right")
+    table.add_column("Создан", style="green", min_width=20)
+    table.add_column("Склад ID", style="white", justify="right")
+
+    with conn.cursor(row_factory=class_row(Order)) as cur:
+        cur.execute("SELECT * FROM sales.orders ORDER BY id")
+        orders: list[Order] = cur.fetchall()
+
+    for o in orders:
+        table.add_row(
+            str(o.id),
+            o.status,
+            f"{o.total_amount:.2f}",
+            str(o.created_at),
+            str(o.warehouse_id),
+        )
+    console.print(table)
+
+
+@command("show order", "информация о заказе", CATEGORY_ORDERS)
+def show_order(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+
+    _render_order(order)
+    items = _get_order_items(int(order_id))
+    _render_order_items(items)
 
 
 @command("add order", "добавить заказ (интерактивно)", CATEGORY_ORDERS)
 def add_order() -> None:
     conn = get_conn()
 
-    warehouses = get_warehouses()
-    if not warehouses:
-        render_error("Сначала добавьте хотя бы один склад.")
+    # Находим центральный склад
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM catalog.warehouses WHERE is_central = True")
+        central_warehouse = cur.fetchone()
+
+    if not central_warehouse:
+        render_error("Центральный склад не найден. Сначала создайте центральный склад.")
         return
 
-    wh_ids = [str(w.id) for w in warehouses]
-    wh_completer = WordCompleter(wh_ids, ignore_case=True)
-    wh_validator = ChoiceValidator(wh_ids, message="ID склада должен быть из списка. Используйте Tab.")
+    warehouse_id = central_warehouse[0]
 
-    warehouse_id = prompt("ID склада: ", validator=wh_validator, completer=wh_completer).strip()
-    status = "unpublished"
-
+    # Создаём заказ
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO sales.orders (status, warehouse_id) 
-            VALUES (%s, %s) RETURNING id
-        """, (status, warehouse_id))
-        order_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO sales.orders (status, warehouse_id)
+            VALUES ('unpublished', %s)
+            RETURNING id
+            """,
+            (warehouse_id,),
+        )
+        new_order_id: int = cur.fetchone()[0]
 
-    console.print(f"[green]Заказ #{order_id} успешно создан.[/green]")
+    console.print(f"[green]Заказ #{new_order_id} создан (отгрузка с центрального склада).[/green]")
 
-    while True:
-        add_more = prompt("Добавить товар в заказ? (y/n, д/н): ", validator=YesNoValidator()).strip()
-        if not YesNoValidator.is_yes(add_more):
-            break
-        _add_order_item_interactive(conn, order_id)
+    # Сразу предлагаем добавить товары
+    add_now = prompt("Добавить товары в заказ сейчас? (y/n, д/н): ", validator=YesNoValidator()).strip()
+    if YesNoValidator.is_yes(add_now):
+        _add_items_interactively(new_order_id)
 
-    _recalculate_order_total(conn, order_id)
+    # Финальный вывод
+    order = _get_order_or_fail(str(new_order_id))
+    if order:
+        _render_order(order)
+        _render_order_items(_get_order_items(new_order_id))
 
 
 @command("edit order", "редактировать заказ", CATEGORY_ORDERS)
-def edit_order(_id: str) -> None:
-    conn = get_conn()
-    with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders WHERE id = %s", (_id,))
-        order: Order | None = cur.fetchone()
-
+def edit_order(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
     if order is None:
-        render_error(f"Заказ с ID {_id} не найден")
+        return
+    if not _check_editable(order, "редактировать"):
         return
 
-    warehouses = get_warehouses()
-    wh_ids = [str(w.id) for w in warehouses]
-    wh_completer = WordCompleter(wh_ids, ignore_case=True)
-    wh_validator = ChoiceValidator(wh_ids, message="ID склада должен быть из списка. Используйте Tab.")
+    conn = get_conn()
 
-    warehouse_id = prompt("ID склада: ", default=str(order.warehouse_id), validator=wh_validator,
-                          completer=wh_completer).strip()
-    status = prompt("Статус: ", default=order.status, validator=status_validator, completer=status_completer).strip()
+    # Выбор нового склада
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, city, address, label FROM catalog.warehouses ORDER BY id")
+        warehouses = cur.fetchall()
 
-    conn.execute("""
-        UPDATE sales.orders SET status = %s, warehouse_id = %s WHERE id = %s
-    """, (status, warehouse_id, _id))
+    if not warehouses:
+        render_error("Нет доступных складов.")
+        return
 
-    console.print(f"[green]Заказ #{_id} успешно обновлен.[/green]")
+    wh_choices = [
+        f"{w[0]} | {w[1]} | {w[2]}" + (f" | {w[3]}" if w[3] else "")
+        for w in warehouses
+    ]
+    wh_completer = WordCompleter(wh_choices, ignore_case=True, sentence=True)
+    wh_validator = ChoiceValidator(wh_choices, message="Выберите склад из списка.")
+
+    wh_raw = prompt(
+        "Склад: ",
+        completer=wh_completer,
+        validator=wh_validator,
+        default=next(
+            (c for c, w in zip(wh_choices, warehouses) if w[0] == order.warehouse_id),
+            wh_choices[0],
+        ),
+    ).strip()
+
+    try:
+        idx = wh_choices.index(wh_raw)
+        new_warehouse_id = warehouses[idx][0]
+    except ValueError:
+        render_error("Не удалось определить склад.")
+        return
+
+    conn.execute(
+        "UPDATE sales.orders SET warehouse_id = %s WHERE id = %s",
+        (new_warehouse_id, order_id),
+    )
+    console.print(f"[green]Заказ #{order_id} обновлён.[/green]")
 
 
 @command("delete order", "удалить заказ", CATEGORY_ORDERS)
-def delete_order(_id: str) -> None:
-    conn = get_conn()
-    with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders WHERE id = %s", (_id,))
-        order: Order | None = cur.fetchone()
-
+def delete_order(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
     if order is None:
-        render_error(f"Заказ с ID {_id} не найден")
+        return
+    if not _check_editable(order, "удалять"):
         return
 
-    answer = prompt("Вы уверены? (y/n, д/н): ", validator=YesNoValidator())
+    _render_order(order)
+    _render_order_items(_get_order_items(int(order_id)))
 
+    answer = prompt("Вы уверены? (y/n, д/н): ", validator=YesNoValidator())
     if YesNoValidator.is_yes(answer):
-        conn.execute("DELETE FROM sales.orders WHERE id = %s", (_id,))
-        console.print(f"[green]Заказ #{_id} удален.[/green]")
+        conn = get_conn()
+        conn.execute("DELETE FROM sales.orders WHERE id = %s", (order_id,))
+        console.print(f"[green]Заказ #{order_id} удалён.[/green]")
+
+
+@command("publish order", "опубликовать заказ (unpublished -> new)", CATEGORY_ORDERS)
+def publish_order(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+
+    if order.status != "unpublished":
+        render_error(
+            f"Заказ уже имеет статус '{order.status}'. "
+            f"Публикация возможна только из статуса 'unpublished'."
+        )
+        return
+
+    items = _get_order_items(int(order_id))
+    if not items:
+        render_error("Нельзя опубликовать пустой заказ. Добавьте хотя бы один товар.")
+        return
+
+    conn = get_conn()
+    conn.execute(
+        "UPDATE sales.orders SET status = 'new' WHERE id = %s",
+        (order_id,),
+    )
+    console.print(f"[green]Заказ #{order_id} опубликован (статус: new).[/green]")
+
+
+# ------------------------------------------------------------
+# CRUD: Order Items
+# ------------------------------------------------------------
+
+def _prompt_order_item_choice(order_id: int) -> OrderItem | None:
+    """Выбор позиции заказа через prompt_toolkit choice."""
+    items = _get_order_items(order_id)
+    if not items:
+        render_error("В заказе нет позиций.")
+        return None
+
+    choices = [
+        f"{it.id} | {it.product_name} | {it.price:.2f} × {it.quantity}"
+        for it in items
+    ]
+    completer = WordCompleter(choices, ignore_case=True, sentence=True)
+    validator = ChoiceValidator(choices, message="Выберите позицию из списка.")
+
+    raw = prompt("Позиция: ", completer=completer, validator=validator).strip()
+    try:
+        idx = choices.index(raw)
+        return items[idx]
+    except ValueError:
+        return None
 
 
 @command("add order_item", "добавить товар в заказ", CATEGORY_ORDERS)
-def add_order_item_cmd(order_id: str) -> None:
-    conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM sales.orders WHERE id = %s", (order_id,))
-        if not cur.fetchone():
-            render_error(f"Заказ с ID {order_id} не найден.")
-            return
-
-    _add_order_item_interactive(conn, int(order_id))
-    _recalculate_order_total(conn, int(order_id))
-
-
-@command("edit order_item", "редактировать товар в заказе", CATEGORY_ORDERS)
-def edit_order_item_cmd(order_id: str) -> None:
-    conn = get_conn()
-
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT oi.product_id, p.name, p.sku 
-            FROM sales.order_items oi
-            JOIN catalog.products p ON oi.product_id = p.id
-            WHERE oi.order_id = %s
-        """, (order_id,))
-        items = cur.fetchall()
-
-    if not items:
-        render_error(f"В заказе #{order_id} нет товаров для редактирования.")
+def add_order_item(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+    if not _check_editable(order, "добавлять товары в"):
         return
 
-    choices = []
-    product_ids = []
-    for i, (prod_id, name, sku) in enumerate(items, 1):
-        choice_str = f"{i} - {name} ({sku})"
-        choices.append(choice_str)
-        product_ids.append(prod_id)
-
-    choice_validator = ChoiceValidator(choices, message="Выберите товар из списка. Используйте Tab.")
-    choice_completer = WordCompleter(choices, ignore_case=True)
-
-    selected = prompt("Выберите товар для редактирования:\n" + "\n".join(choices) + "\nВаш выбор: ",
-                      validator=choice_validator, completer=choice_completer).strip()
-
-    idx = choices.index(selected)
-    old_product_id = product_ids[idx]
-
-    with conn.cursor() as cur:
-        cur.execute("SELECT product_id FROM sales.order_items WHERE order_id = %s AND product_id != %s",
-                    (order_id, old_product_id))
-        existing_ids = {row[0] for row in cur.fetchall()}
-
-    with conn.cursor(row_factory=class_row(Product)) as cur:
-        cur.execute("SELECT id, sku, name, price FROM catalog.products")
-        all_products = cur.fetchall()
-
-    available_products = [p for p in all_products if p.id not in existing_ids]
-
-    if not available_products:
-        render_error("Нет доступных товаров для замены.")
+    products = _get_all_products()
+    if not products:
+        render_error("Каталог товаров пуст.")
         return
 
-    sku_to_product = {p.sku: p for p in available_products}
-    skus = list(sku_to_product.keys())
+    existing = _get_order_items(int(order_id))
+    exclude_ids = {item.product_id for item in existing}
 
-    sku_completer = WordCompleter(skus, ignore_case=True)
-    sku_validator = ChoiceValidator(skus, message="Артикул должен быть из списка. Используйте Tab.")
+    product = _prompt_product_choice(products, exclude_ids)
+    if product is None:
+        return
 
-    new_sku = prompt("Новый артикул товара: ", validator=sku_validator, completer=sku_completer).strip()
-    new_product = sku_to_product[new_sku]
+    quantity_str = prompt(
+        "Количество: ",
+        validator=PositiveIntValidator(),
+    ).strip()
+    quantity = int(quantity_str)
 
-    conn.execute("""
-        UPDATE sales.order_items SET product_id = %s 
-        WHERE order_id = %s AND product_id = %s
-    """, (new_product.id, order_id, old_product_id))
-
-    _recalculate_order_total(conn, int(order_id))
-    console.print(f"[green]Товар в заказе #{order_id} успешно заменен на '{new_product.name}'.[/green]")
-
-
-@command("delete order_item", "удалить товар из заказа", CATEGORY_ORDERS)
-def delete_order_item_cmd(order_id: str) -> None:
     conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO sales.order_items (order_id, product_id, price, quantity)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (order_id, product.id, product.price, quantity),
+    )
+    _recalculate_total(int(order_id))
+    console.print(
+        f"[green]Добавлено: {product.name} × {quantity} по {product.price:.2f}[/green]"
+    )
 
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT oi.product_id, p.name, p.sku 
-            FROM sales.order_items oi
-            JOIN catalog.products p ON oi.product_id = p.id
-            WHERE oi.order_id = %s
-        """, (order_id,))
-        items = cur.fetchall()
 
-    if not items:
-        render_error(f"В заказе #{order_id} нет товаров для удаления.")
+@command("edit order_item", "редактировать позицию заказа", CATEGORY_ORDERS)
+def edit_order_item(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+    if not _check_editable(order, "редактировать позиции"):
         return
 
-    choices = []
-    product_ids = []
-    for i, (prod_id, name, sku) in enumerate(items, 1):
-        choice_str = f"{i} - {name} ({sku})"
-        choices.append(choice_str)
-        product_ids.append(prod_id)
+    item = _prompt_order_item_choice(int(order_id))
+    if item is None:
+        return
 
-    choice_validator = ChoiceValidator(choices, message="Выберите товар из списка. Используйте Tab.")
-    choice_completer = WordCompleter(choices, ignore_case=True)
+    quantity_str = prompt(
+        f"Количество (было {item.quantity}): ",
+        default=str(item.quantity),
+        validator=PositiveIntValidator(),
+    ).strip()
+    new_quantity = int(quantity_str)
 
-    selected = prompt("Выберите товар для удаления:\n" + "\n".join(choices) + "\nВаш выбор: ",
-                      validator=choice_validator, completer=choice_completer).strip()
+    conn = get_conn()
+    conn.execute(
+        "UPDATE sales.order_items SET quantity = %s WHERE id = %s",
+        (new_quantity, item.id),
+    )
+    _recalculate_total(int(order_id))
+    console.print(f"[green]Позиция #{item.id} обновлена: количество = {new_quantity}.[/green]")
 
-    idx = choices.index(selected)
-    product_id = product_ids[idx]
 
-    answer = prompt("Вы уверены? (y/n, д/н): ", validator=YesNoValidator()).strip()
+@command("delete order_item", "удалить позицию из заказа", CATEGORY_ORDERS)
+def delete_order_item(order_id: str) -> None:
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+    if not _check_editable(order, "удалять позиции из"):
+        return
+
+    item = _prompt_order_item_choice(int(order_id))
+    if item is None:
+        return
+
+    answer = prompt("Удалить эту позицию? (y/n, д/н): ", validator=YesNoValidator())
     if YesNoValidator.is_yes(answer):
-        conn.execute("""
-            DELETE FROM sales.order_items 
-            WHERE order_id = %s AND product_id = %s
-        """, (order_id, product_id))
-        _recalculate_order_total(conn, int(order_id))
-        console.print(f"[green]Товар удален из заказа #{order_id}.[/green]")
+        conn = get_conn()
+        conn.execute("DELETE FROM sales.order_items WHERE id = %s", (item.id,))
+        _recalculate_total(int(order_id))
+        console.print(f"[green]Позиция #{item.id} удалена.[/green]")

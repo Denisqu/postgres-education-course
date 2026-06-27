@@ -14,8 +14,9 @@ CREATE TABLE sales.orders (
 );
 
 CREATE TABLE sales.order_items (
-    order_id   INTEGER        NOT NULL
-        REFERENCES sales.orders(id) ON DELETE CASCADE,
-    product_id INTEGER        NOT NULL
-        REFERENCES catalog.products(id) ON DELETE RESTRICT
+    order_id   INTEGER        NOT NULL REFERENCES sales.orders(id) ON DELETE CASCADE,
+    product_id INTEGER        NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
+    price      NUMERIC(12, 2) NOT NULL CHECK (price > 0),
+    quantity   INTEGER        NOT NULL CHECK (quantity > 0),
+    PRIMARY KEY (order_id, product_id)
 );
