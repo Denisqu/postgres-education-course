@@ -159,7 +159,6 @@ def _prompt_product_choice(
         render_error("Нет доступных товаров для добавления (все уже в заказе или каталог пуст).")
         return None
 
-    # Автокомплит по "SKU | Название | Цена"
     choices = [f"{p.name} ({p.sku}, {p.price:.2f})" for p in available]
     completer = WordCompleter(choices, ignore_case=True, sentence=True)
     validator = ChoiceValidator(
@@ -385,7 +384,7 @@ def publish_order(order_id: str) -> None:
 
 
 def _prompt_order_item_choice(order_id: int) -> OrderItem | None:
-    """Выбор позиции заказа через prompt_toolkit choice."""
+    """Выбор позиции заказа"""
     items = _get_order_items(order_id)
     if not items:
         render_error("В заказе нет позиций.")
