@@ -1,3 +1,4 @@
+import argparse
 import logging
 
 from prompt_toolkit import PromptSession
@@ -5,6 +6,7 @@ from prompt_toolkit import PromptSession
 from console import console, render_error
 from db import connect, DB_USER, close
 from setup import setup_logger
+from auth import login
 
 # pylint: disable-next=unused-import
 import handlers
@@ -18,6 +20,13 @@ def main() -> None:
     # Подключение к БД
     connect()
     logging.info("App Started")
+
+    # Parse CLI args
+    parser = argparse.ArgumentParser(description="Inventory Management System")
+    parser.add_argument("-u", "--username", help="Username for authentication")
+    parser.add_argument("-p", "--password", help="Password for authentication")
+    cli_args = parser.parse_args()
+    login(username=cli_args.username, password=cli_args.password)
 
     # Вывод заголовка через rich
     console.print("\n[bold cyan]═══════════════════════════════════════[/bold cyan]")
