@@ -4,3 +4,6 @@ postgresql_data
 __pycache__
 .mypy_cache
 logs/
+
+my_helper_folder
+schema.sql

@@ -1,12 +1,9 @@
 CREATE SCHEMA IF NOT EXISTS sales;
 
-CREATE TYPE sales.order_status AS ENUM (
-    'unpublished', 'new', 'processing', 'pending', 'packing', 'shipped'
-);
-
 CREATE TABLE sales.orders (
     id           SERIAL PRIMARY KEY,
-    status       sales.order_status NOT NULL DEFAULT 'unpublished',
+    status       VARCHAR(20) NOT NULL DEFAULT 'unpublished'
+        CHECK (status IN ('unpublished', 'new', 'processing', 'pending', 'packing', 'shipped')),
     total_amount NUMERIC(12, 2)     NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
     created_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     warehouse_id INTEGER            NOT NULL
