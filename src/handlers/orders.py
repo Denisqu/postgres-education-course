@@ -11,7 +11,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PositiveIntValidator
 from commands import command, CATEGORY_ORDERS
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, auth_user
 
 ORDER_STATUSES = [
     "unpublished", "new", "processing", "pending", "packing", "shipped"
@@ -21,6 +21,7 @@ status_validator = ChoiceValidator(
     message=f"Статус должен быть одним из: {', '.join(ORDER_STATUSES)}",
 )
 
+
 @dataclass
 class Order:
     id: int
@@ -28,6 +29,7 @@ class Order:
     total_amount: Decimal
     created_at: str
     warehouse_id: int
+    created_by_username: str
 
 @dataclass
 class OrderItem:
@@ -36,6 +38,7 @@ class OrderItem:
     product_name: str
     price: Decimal
     quantity: int
+
 
 @dataclass
 class Product:
@@ -98,6 +101,7 @@ def _render_order(order: Order) -> None:
     table.add_row("Сумма", f"{order.total_amount:.2f}")
     table.add_row("Создан", str(order.created_at))
     table.add_row("Склад ID", str(order.warehouse_id))
+    table.add_row("Создал", order.created_by_username)
 
     panel = Panel(
         table,
@@ -134,7 +138,13 @@ def _get_order_or_fail(order_id: str) -> Order | None:
     """Получить заказ по ID или вывести ошибку."""
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders WHERE id = %s", (order_id,))
+        cur.execute("""
+            SELECT o.id, o.status, o.total_amount, o.created_at, o.warehouse_id, 
+                   u.username AS created_by_username
+            FROM sales.orders o
+            JOIN auth.users u ON o.created_by = u.id
+            WHERE o.id = %s
+        """, (order_id,))
         order: Order | None = cur.fetchone()
 
     if order is None:
@@ -252,9 +262,16 @@ def list_orders() -> None:
     table.add_column("Сумма", style="yellow", justify="right")
     table.add_column("Создан", style="green", min_width=20)
     table.add_column("Склад ID", style="white", justify="right")
+    table.add_column("Создал", style="cyan", min_width=15)
 
     with conn.cursor(row_factory=class_row(Order)) as cur:
-        cur.execute("SELECT * FROM sales.orders ORDER BY id")
+        cur.execute("""
+            SELECT o.id, o.status, o.total_amount, o.created_at, o.warehouse_id, 
+                   u.username AS created_by_username
+            FROM sales.orders o
+            JOIN auth.users u ON o.created_by = u.id
+            ORDER BY o.id
+        """)
         orders: list[Order] = cur.fetchall()
 
     for o in orders:
@@ -264,6 +281,7 @@ def list_orders() -> None:
             f"{o.total_amount:.2f}",
             str(o.created_at),
             str(o.warehouse_id),
+            o.created_by_username,
         )
     console.print(table)
 
@@ -286,15 +304,18 @@ def add_order() -> None:
         return
 
     conn = get_conn()
+
+    current_user_id = auth_user().id
+
     # Создаём заказ
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO sales.orders (status, warehouse_id)
-            VALUES ('unpublished', %s)
+            INSERT INTO sales.orders (status, warehouse_id, created_by)
+            VALUES ('unpublished', %s, %s)
             RETURNING id
             """,
-            (warehouse_id,),
+            (warehouse_id, current_user_id),
         )
         new_order_id: int = cur.fetchone()[0]
 

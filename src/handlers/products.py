@@ -16,7 +16,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PriceValidator
 from commands import command, CATEGORY_WAREHOUSES
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ALL_ROLES
 
 
 @dataclass
@@ -81,7 +81,7 @@ def _get_category_name(conn, category_id: int | None) -> str | None:
         result = cur.fetchone()
         return result[0] if result else None
 
-@command("list products", "список всех товаров", CATEGORY_PRODUCTS, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
+@command("list products", "список всех товаров", CATEGORY_PRODUCTS, [ALL_ROLES])
 def list_products() -> None:
     """
     Выводит список всех продуктов из таблицы catalog.products.
@@ -113,7 +113,7 @@ def list_products() -> None:
     console.print(table)
 
 
-@command("show product", "информация о товаре", CATEGORY_PRODUCTS, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
+@command("show product", "информация о товаре", CATEGORY_PRODUCTS, [ALL_ROLES])
 def show_product(_id: str) -> None:
     """
     Показывает детальную информацию о продукте по его ID.

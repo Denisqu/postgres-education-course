@@ -14,7 +14,7 @@ from rich.table import Table
 from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ALL_ROLES
 
 @dataclass
 class ProductCategory:
@@ -35,7 +35,7 @@ def _render_product_category(category: ProductCategory) -> None:
     )
     console.print(panel)
 
-@command("list product_categories", "список всех категорий", CATEGORY_PRODUCT_CATEGORIES, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
+@command("list product_categories", "список всех категорий", CATEGORY_PRODUCT_CATEGORIES, [ALL_ROLES])
 def list_product_categories() -> None:
     conn = get_conn()
     table = Table(title="Склады", show_header=True, header_style="bold cyan")
@@ -53,7 +53,7 @@ def list_product_categories() -> None:
         )
     console.print(table)
 
-@command("show product_category", "информация о категории", CATEGORY_PRODUCT_CATEGORIES, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
+@command("show product_category", "информация о категории", CATEGORY_PRODUCT_CATEGORIES, [ALL_ROLES])
 def show_product_category(_id:str) -> None:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(ProductCategory)) as cur:
