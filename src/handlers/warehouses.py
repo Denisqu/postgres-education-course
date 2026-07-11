@@ -12,28 +12,13 @@ from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command, CATEGORY_WAREHOUSES
 from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
 
-cities = [
-    "Москва",
-    "Санкт-Петербург",
-    "Новосибирск",
-    "Екатеринбург",
-    "Казань",
-    "Нижний Новгород",
-    "Челябинск",
-    "Самара",
-    "Омск",
-    "Ростов-на-Дону",
-    "Уфа",
-    "Красноярск",
-    "Воронеж",
-    "Пермь",
-    "Волгоград",
-]
 
-city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
-city_validator = ChoiceValidator(
-    cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
-)
+def get_cities() -> list[str]:
+    """Получает список городов из базы данных."""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM catalog.cities ORDER BY name")
+        return [row[0] for row in cur.fetchall()]
 
 
 @dataclass
@@ -105,14 +90,16 @@ def show_warehouse(_id: str) -> None:
 
     _render_warehouse(warehouse)
 
+
 def isCentralWarehouseExists() -> bool:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-        cur.execute("SELECT * FROM catalog.warehouses")
+        cur.execute("SELECT * FROM catalog.warehouses WHERE is_central = True")
         warehouse: Warehouse | None = cur.fetchone()
     if warehouse is None:
         return False
     return True
+
 
 def isCentralWarehouseExistsWithDifferentId(_id: str) -> bool:
     conn = get_conn()
@@ -123,19 +110,27 @@ def isCentralWarehouseExistsWithDifferentId(_id: str) -> bool:
         return False
     return True
 
+
 @command("add warehouse", "добавить склад (интерактивно)", CATEGORY_WAREHOUSES, [ROLE_CATALOG_MANAGER])
 def add_warehouse() -> None:
     conn = get_conn()
 
+    cities = get_cities()
+    city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
+    city_validator = ChoiceValidator(
+        cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
+    )
+
     city = prompt("Город: ", validator=city_validator, completer=city_completer).strip()
     address = prompt("Адрес: ", validator=NonEmptyValidator()).strip()
     label = prompt("Метка (необязательно): ").strip() or None
+
     is_central = True
     is_need_change_central_warehouse = False
     if isCentralWarehouseExists():
         is_central = YesNoValidator.is_yes(prompt("Центральный склад уже существует. Сделать новый склад центральным? ",
-                            validator=YesNoValidator())
-                      .strip())
+                                                  validator=YesNoValidator())
+                                           .strip())
         is_need_change_central_warehouse = is_central
 
     if is_need_change_central_warehouse:
@@ -159,6 +154,12 @@ def add_warehouse() -> None:
 @command("edit warehouse", "редактировать склад", CATEGORY_WAREHOUSES, [ROLE_CATALOG_MANAGER])
 def edit_warehouse(_id: str) -> None:
     conn = get_conn()
+
+    cities = get_cities()
+    city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
+    city_validator = ChoiceValidator(
+        cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
+    )
 
     with conn.cursor(row_factory=class_row(Warehouse)) as cur:
         cur.execute("SELECT * FROM catalog.warehouses WHERE id = %s", (_id,))
