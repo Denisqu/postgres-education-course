@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import timedelta
 
 from prompt_toolkit import prompt
 from prompt_toolkit.completion import WordCompleter
@@ -28,9 +29,14 @@ class Route:
     from_city_name: str
     to_city_id: int
     to_city_name: str
-    duration: int
+    duration: timedelta
     total_threshold: float
 
+
+def _format_duration(td: timedelta) -> str:
+    """Форматирует timedelta в читаемый вид (минуты)."""
+    minutes = int(td.total_seconds() // 60)
+    return f"{minutes} мин."
 
 def _render_route(route: Route) -> None:
     table = Table(show_header=False, box=None, padding=(0, 2))
@@ -42,7 +48,7 @@ def _render_route(route: Route) -> None:
     table.add_row("Откуда (Город)", route.from_city_name)
     table.add_row("Куда (ID)", str(route.to_city_id))
     table.add_row("Куда (Город)", route.to_city_name)
-    table.add_row("Длительность", str(route.duration))
+    table.add_row("Длительность", _format_duration(route.duration))
     table.add_row("Порог", str(route.total_threshold))
 
     panel = Panel(
@@ -55,7 +61,21 @@ def _render_route(route: Route) -> None:
     console.print(panel)
 
 
-@command("list routes", "список всех маршрутов", CATEGORY_ROUTES, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
+def _get_existing_routes(conn) -> list[tuple[str, str, int, int]]:
+    """Возвращает список существующих маршрутов: (from_name, to_name, from_id, to_id)"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT c1.name, c2.name, r.from_city_id, r.to_city_id
+            FROM inventory.routes r
+            JOIN catalog.cities c1 ON r.from_city_id = c1.id
+            JOIN catalog.cities c2 ON r.to_city_id = c2.id
+            ORDER BY c1.name, c2.name
+        """)
+        return cur.fetchall()
+
+
+@command("list routes", "список всех маршрутов", CATEGORY_ROUTES,
+         [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER])
 def list_routes() -> None:
     conn = get_conn()
     table = Table(title="Маршруты", show_header=True, header_style="bold cyan")
@@ -83,53 +103,45 @@ def list_routes() -> None:
         table.add_row(
             route.from_city_name,
             route.to_city_name,
-            str(route.duration),
+            _format_duration(route.duration),
             str(route.total_threshold)
         )
     console.print(table)
+
 
 @command("show route", "информация о маршруте", CATEGORY_ROUTES,
          [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER])
 def show_route() -> None:
     conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT c1.name || ' -> ' || c2.name 
-            FROM inventory.routes r
-            JOIN catalog.cities c1 ON r.from_city_id = c1.id
-            JOIN catalog.cities c2 ON r.to_city_id = c2.id
-        """)
-        existing_routes = [row[0] for row in cur.fetchall()]
+    routes_data = _get_existing_routes(conn)
 
-    if not existing_routes:
+    if not routes_data:
         render_error("Нет созданных маршрутов.")
         return
 
-    completer = WordCompleter(existing_routes, ignore_case=True, sentence=True)
-    validator = ChoiceValidator(existing_routes, message="Выберите маршрут из списка.")
+    pair_labels = [f"{row[0]} -> {row[1]}" for row in routes_data]
+    pair_completer = WordCompleter(pair_labels, ignore_case=True, sentence=True)
+    pair_validator = ChoiceValidator(pair_labels, message="Выберите маршрут из списка.")
 
-    selected = prompt("Выберите маршрут: ", validator=validator, completer=completer).strip()
-    from_city, to_city = selected.split(" -> ")
+    selected_pair = prompt("Выберите маршрут: ", validator=pair_validator, completer=pair_completer).strip()
+    from_city, to_city = selected_pair.split(" -> ")
 
     query = """
-            SELECT 
-                r.from_city_id, c1.name AS from_city_name,
-                r.to_city_id, c2.name AS to_city_name,
-                r.duration, r.total_threshold
-            FROM inventory.routes r
-            JOIN catalog.cities c1 ON r.from_city_id = c1.id
-            JOIN catalog.cities c2 ON r.to_city_id = c2.id
-            WHERE c1.name = %s AND c2.name = %s
-        """
+        SELECT 
+            r.from_city_id, c1.name AS from_city_name,
+            r.to_city_id, c2.name AS to_city_name,
+            r.duration, r.total_threshold
+        FROM inventory.routes r
+        JOIN catalog.cities c1 ON r.from_city_id = c1.id
+        JOIN catalog.cities c2 ON r.to_city_id = c2.id
+        WHERE c1.name = %s AND c2.name = %s
+    """
     with conn.cursor(row_factory=class_row(Route)) as cur:
         cur.execute(query, (from_city, to_city))
         route: Route | None = cur.fetchone()
 
-    if route is None:
-        render_error(f"Маршрут из {from_city} в {to_city} не найден")
-        return
-
-    _render_route(route)
+    if route:
+        _render_route(route)
 
 
 @command("add route", "добавить маршрут (интерактивно)", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
@@ -174,11 +186,14 @@ def add_route() -> None:
         cur.execute("SELECT id FROM catalog.cities WHERE name = %s", (to_city_name,))
         to_city_id = cur.fetchone()[0]
 
-    duration_str = prompt("Длительность: ", validator=NonEmptyValidator()).strip()
+    duration_str = prompt("Длительность (в минутах): ", validator=NonEmptyValidator()).strip()
     try:
-        duration = int(duration_str)
+        minutes = int(duration_str)
+        if minutes <= 0:
+            raise ValueError
+        duration = timedelta(minutes=minutes)
     except ValueError:
-        render_error("Длительность должна быть целым числом.")
+        render_error("Длительность должна быть положительным целым числом.")
         return
 
     threshold_str = prompt("Общий порог (total_threshold): ", validator=NonEmptyValidator()).strip()
@@ -196,8 +211,20 @@ def add_route() -> None:
 
 
 @command("edit route", "редактировать маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
-def edit_route(from_city: str, to_city: str) -> None:
+def edit_route() -> None:
     conn = get_conn()
+    routes_data = _get_existing_routes(conn)
+
+    if not routes_data:
+        render_error("Нет созданных маршрутов.")
+        return
+
+    pair_labels = [f"{row[0]} -> {row[1]}" for row in routes_data]
+    pair_completer = WordCompleter(pair_labels, ignore_case=True, sentence=True)
+    pair_validator = ChoiceValidator(pair_labels, message="Выберите маршрут из списка.")
+
+    selected_pair = prompt("Выберите маршрут: ", validator=pair_validator, completer=pair_completer).strip()
+    from_city, to_city = selected_pair.split(" -> ")
 
     query = """
         SELECT 
@@ -220,15 +247,19 @@ def edit_route(from_city: str, to_city: str) -> None:
 
     _render_route(route)
 
+    current_minutes = int(route.duration.total_seconds() // 60)
     duration_str = prompt(
-        "Длительность: ",
-        default=str(route.duration),
+        "Длительность (в минутах): ",
+        default=str(current_minutes),
         validator=NonEmptyValidator()
     ).strip()
     try:
-        duration = int(duration_str)
+        minutes = int(duration_str)
+        if minutes <= 0:
+            raise ValueError
+        duration = timedelta(minutes=minutes)
     except ValueError:
-        render_error("Длительность должна быть целым числом.")
+        render_error("Длительность должна быть положительным целым числом.")
         return
 
     threshold_str = prompt(
@@ -252,8 +283,20 @@ def edit_route(from_city: str, to_city: str) -> None:
 
 
 @command("delete route", "удалить маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
-def delete_route(from_city: str, to_city: str) -> None:
+def delete_route() -> None:  # Убраны аргументы
     conn = get_conn()
+    routes_data = _get_existing_routes(conn)
+
+    if not routes_data:
+        render_error("Нет созданных маршрутов.")
+        return
+
+    pair_labels = [f"{row[0]} -> {row[1]}" for row in routes_data]
+    pair_completer = WordCompleter(pair_labels, ignore_case=True, sentence=True)
+    pair_validator = ChoiceValidator(pair_labels, message="Выберите маршрут из списка.")
+
+    selected_pair = prompt("Выберите маршрут: ", validator=pair_validator, completer=pair_completer).strip()
+    from_city, to_city = selected_pair.split(" -> ")
 
     query = """
         SELECT 
