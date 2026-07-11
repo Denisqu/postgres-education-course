@@ -123,9 +123,10 @@ GRANT UPDATE (status, processing_by) ON sales.orders TO inventory_manager;
 GRANT USAGE ON SCHEMA inventory TO worker;
 GRANT SELECT ON ALL TABLES IN SCHEMA inventory TO worker;
 ALTER DEFAULT PRIVILEGES IN SCHEMA inventory GRANT SELECT ON TABLES TO worker;
+
 GRANT ALL ON inventory.stock TO worker;
-GRANT UPDATE ON inventory.reserves TO worker;
-GRANT UPDATE ON inventory.deliveries TO worker;
-GRANT UPDATE ON inventory.delivery_items TO worker;
-GRANT UPDATE ON inventory.transfers TO worker;
-GRANT UPDATE ON inventory.transfer_items TO worker;
+GRANT UPDATE (quantity) ON inventory.reserves TO worker;
+GRANT UPDATE (status, shipped_at) ON inventory.deliveries TO worker;
+GRANT UPDATE (status) ON inventory.delivery_items TO worker;
+GRANT UPDATE (status, started_at, arriving_at, received_at) ON inventory.transfers TO worker;
+GRANT UPDATE (status) ON inventory.transfer_items TO worker;
