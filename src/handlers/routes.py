@@ -10,7 +10,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER
 from commands import CATEGORY_ROUTES
 
 
@@ -88,20 +88,39 @@ def list_routes() -> None:
         )
     console.print(table)
 
-
-@command("show route", "информация о маршруте", CATEGORY_ROUTES, [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER])
-def show_route(from_city: str, to_city: str) -> None:
+@command("show route", "информация о маршруте", CATEGORY_ROUTES,
+         [ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER])
+def show_route() -> None:
     conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT c1.name || ' -> ' || c2.name 
+            FROM inventory.routes r
+            JOIN catalog.cities c1 ON r.from_city_id = c1.id
+            JOIN catalog.cities c2 ON r.to_city_id = c2.id
+        """)
+        existing_routes = [row[0] for row in cur.fetchall()]
+
+    if not existing_routes:
+        render_error("Нет созданных маршрутов.")
+        return
+
+    completer = WordCompleter(existing_routes, ignore_case=True, sentence=True)
+    validator = ChoiceValidator(existing_routes, message="Выберите маршрут из списка.")
+
+    selected = prompt("Выберите маршрут: ", validator=validator, completer=completer).strip()
+    from_city, to_city = selected.split(" -> ")
+
     query = """
-        SELECT 
-            r.from_city_id, c1.name AS from_city_name,
-            r.to_city_id, c2.name AS to_city_name,
-            r.duration, r.total_threshold
-        FROM inventory.routes r
-        JOIN catalog.cities c1 ON r.from_city_id = c1.id
-        JOIN catalog.cities c2 ON r.to_city_id = c2.id
-        WHERE c1.name = %s AND c2.name = %s
-    """
+            SELECT 
+                r.from_city_id, c1.name AS from_city_name,
+                r.to_city_id, c2.name AS to_city_name,
+                r.duration, r.total_threshold
+            FROM inventory.routes r
+            JOIN catalog.cities c1 ON r.from_city_id = c1.id
+            JOIN catalog.cities c2 ON r.to_city_id = c2.id
+            WHERE c1.name = %s AND c2.name = %s
+        """
     with conn.cursor(row_factory=class_row(Route)) as cur:
         cur.execute(query, (from_city, to_city))
         route: Route | None = cur.fetchone()
@@ -113,7 +132,7 @@ def show_route(from_city: str, to_city: str) -> None:
     _render_route(route)
 
 
-@command("add route", "добавить маршрут (интерактивно)", CATEGORY_ROUTES, [ROLE_CATALOG_MANAGER])
+@command("add route", "добавить маршрут (интерактивно)", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def add_route() -> None:
     conn = get_conn()
     query_available = """
@@ -176,7 +195,7 @@ def add_route() -> None:
     console.print(f"[green]Маршрут {from_city_name} -> {to_city_name} добавлен [/green]")
 
 
-@command("edit route", "редактировать маршрут", CATEGORY_ROUTES, [ROLE_CATALOG_MANAGER])
+@command("edit route", "редактировать маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def edit_route(from_city: str, to_city: str) -> None:
     conn = get_conn()
 
@@ -232,7 +251,7 @@ def edit_route(from_city: str, to_city: str) -> None:
     console.print(f"[green]Маршрут {route.from_city_name} -> {route.to_city_name} обновлен [/green]")
 
 
-@command("delete route", "удалить маршрут", CATEGORY_ROUTES, [ROLE_CATALOG_MANAGER])
+@command("delete route", "удалить маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
 def delete_route(from_city: str, to_city: str) -> None:
     conn = get_conn()
 

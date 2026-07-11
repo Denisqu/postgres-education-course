@@ -7,6 +7,7 @@ from users import User, find_user_by_login_and_pass
 
 ROLE_CATALOG_MANAGER: Final[str] = "catalog_manager"
 ROLE_SALES_MANAGER: Final[str] = "sales_manager"
+ROLE_INVENTORY_MANAGER: Final[str] = "inventory_manager"
 
 ALL_ROLES: Final[Sequence[str]] = (
     ROLE_SALES_MANAGER,
