@@ -57,14 +57,12 @@ CREATE TABLE inventory.reserves (
     id SERIAL PRIMARY KEY,
     order_id INT REFERENCES sales.orders(id),
     product_id INT REFERENCES catalog.products(id),
-    warehouse_id INT REFERENCES catalog.warehouses(id),
-    quantity INT NOT NULL CHECK (quantity > 0),
+    quantity INT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE inventory.deliveries (
-    id SERIAL PRIMARY KEY,
-    order_id INT UNIQUE REFERENCES sales.orders(id),
+    order_id INT PRIMARY KEY REFERENCES sales.orders(id),
     status VARCHAR(20) NOT NULL DEFAULT 'planned' 
         CHECK (status IN ('planned', 'shipping', 'shipped')),
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -72,12 +70,12 @@ CREATE TABLE inventory.deliveries (
 );
 
 CREATE TABLE inventory.delivery_items (
-    id SERIAL PRIMARY KEY,
-    delivery_id INTEGER NOT NULL REFERENCES inventory.deliveries(id) ON DELETE CASCADE,
+    order_id INTEGER NOT NULL REFERENCES inventory.deliveries(order_id) ON DELETE CASCADE,
     product_id INTEGER NOT NULL REFERENCES catalog.products(id),
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     status VARCHAR(20) NOT NULL DEFAULT 'planned'
-        CHECK (status IN ('planned', 'shipped'))
+        CHECK (status IN ('planned', 'shipped')),
+    PRIMARY KEY (order_id, product_id)
 );
 
 CREATE TABLE inventory.transfers (
@@ -86,7 +84,6 @@ CREATE TABLE inventory.transfers (
     to_warehouse_id INTEGER NOT NULL REFERENCES catalog.warehouses(id),
     status VARCHAR(20) NOT NULL DEFAULT 'planned'
         CHECK (status IN ('planned', 'shipping', 'in_transit', 'arrived', 'received')),
-    total_amount NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     started_at TIMESTAMP WITH TIME ZONE,
     arriving_at TIMESTAMP WITH TIME ZONE,
