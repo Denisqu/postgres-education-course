@@ -283,7 +283,7 @@ def edit_route() -> None:
 
 
 @command("delete route", "удалить маршрут", CATEGORY_ROUTES, [ROLE_INVENTORY_MANAGER])
-def delete_route() -> None:  # Убраны аргументы
+def delete_route() -> None:
     conn = get_conn()
     routes_data = _get_existing_routes(conn)
 
