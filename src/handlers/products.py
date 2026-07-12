@@ -288,7 +288,8 @@ def view_product_stock() -> None:
         cur.execute("""
             SELECT c.name || ', ' || w.address || COALESCE(', ' || w.label, '') AS wh_info,
                    COALESCE(st.quantity, 0) AS stock_qty,
-                   COALESCE(res.quantity, 0) AS reserve_qty
+                   COALESCE(res.quantity, 0) AS reserve_qty,
+                   COALESCE(st.quantity, 0) + COALESCE(res.quantity, 0) AS total
             FROM catalog.warehouses w
             JOIN catalog.cities c ON w.city_id = c.id
             LEFT JOIN inventory.stock st ON st.warehouse_id = w.id AND st.product_id = %s
@@ -309,8 +310,7 @@ def view_product_stock() -> None:
     table.add_column("Всего", style="bold white", justify="right")
 
     for row in rows:
-        wh_info, stock, reserve = row
-        total = stock + reserve
+        wh_info, stock, reserve, total = row
         table.add_row(wh_info, str(stock), str(reserve), str(total))
 
     console.print(table)

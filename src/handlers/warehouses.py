@@ -303,19 +303,20 @@ def view_warehouse_stock() -> None:
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT p.name, p.sku,
-                   COALESCE(st.quantity, 0) AS stock_qty,
-                   COALESCE(res.quantity, 0) AS reserve_qty
-            FROM catalog.products p
-            LEFT JOIN inventory.stock st ON st.product_id = p.id AND st.warehouse_id = %s
-            LEFT JOIN (
-                SELECT product_id, SUM(quantity) as quantity
-                FROM inventory.reserves
-                WHERE warehouse_id = %s
-                GROUP BY product_id
-            ) res ON res.product_id = p.id
-            ORDER BY p.name
-        """, (warehouse_id, warehouse_id))
+             SELECT p.name, p.sku,
+                    COALESCE(st.quantity, 0) AS stock_qty,
+                    COALESCE(res.quantity, 0) AS reserve_qty,
+                    COALESCE(st.quantity, 0) + COALESCE(res.quantity, 0) AS total
+             FROM catalog.products p
+             LEFT JOIN inventory.stock st ON st.product_id = p.id AND st.warehouse_id = %s
+             LEFT JOIN (
+                 SELECT product_id, SUM(quantity) as quantity
+                 FROM inventory.reserves
+                 WHERE warehouse_id = %s
+                 GROUP BY product_id
+             ) res ON res.product_id = p.id
+             ORDER BY p.name
+         """, (warehouse_id, warehouse_id))
         rows = cur.fetchall()
 
     table = Table(title=f"Остатки на складе #{warehouse_id}", show_header=True, header_style="bold cyan")
@@ -326,8 +327,7 @@ def view_warehouse_stock() -> None:
     table.add_column("Всего", style="bold white", justify="right")
 
     for row in rows:
-        name, sku, stock, reserve = row
-        total = stock + reserve
+        name, sku, stock, reserve, total = row
         table.add_row(name, sku, str(stock), str(reserve), str(total))
 
     console.print(table)
