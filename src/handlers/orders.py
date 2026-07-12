@@ -11,7 +11,7 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PositiveIntValidator
 from commands import command, CATEGORY_ORDERS
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, auth_user
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER, auth_user
 
 ORDER_STATUSES = [
     "unpublished", "new", "processing", "pending", "packing", "shipped"
@@ -30,6 +30,9 @@ class Order:
     created_at: str
     warehouse_id: int
     created_by_username: str
+    warehouse_info: str = ""
+    processing_by_username: str | None = None
+
 
 @dataclass
 class OrderItem:
@@ -38,6 +41,16 @@ class OrderItem:
     product_name: str
     price: Decimal
     quantity: int
+
+
+@dataclass
+class OrderItemInv:
+    order_id: int
+    product_id: int
+    product_name: str
+    price: Decimal
+    quantity: int
+    item_status: str
 
 
 @dataclass
@@ -77,6 +90,115 @@ def _get_order_items(order_id: int) -> list[OrderItem]:
         return cur.fetchall()
 
 
+def _get_order_items_inv(order_id: int, order_status: str, warehouse_id: int) -> list[OrderItemInv]:
+    """Получить позиции заказа с вычисляемым статусом для inventory_manager."""
+    conn = get_conn()
+    with conn.cursor(row_factory=class_row(OrderItem)) as cur:
+        cur.execute("""
+            SELECT oi.order_id, oi.product_id,
+                   p.name AS product_name, oi.price, oi.quantity
+            FROM sales.order_items oi
+            JOIN catalog.products p ON p.id = oi.product_id
+            WHERE oi.order_id = %s
+            ORDER BY p.name
+        """, (order_id,))
+        items = cur.fetchall()
+
+    if not items:
+        return []
+
+    product_ids = [it.product_id for it in items]
+
+    # Получаем резервы
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT product_id, SUM(quantity) as qty
+            FROM inventory.reserves
+            WHERE order_id = %s AND product_id = ANY(%s)
+            GROUP BY product_id
+        """, (order_id, product_ids))
+        reserves = {row[0]: row[1] for row in cur.fetchall()}
+
+    # Получаем накладные на доставку
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT di.product_id, di.status, SUM(di.quantity) as qty
+            FROM inventory.delivery_items di
+            JOIN inventory.deliveries d ON di.delivery_id = d.id
+            WHERE d.order_id = %s AND di.product_id = ANY(%s)
+            GROUP BY di.product_id, di.status
+        """, (order_id, product_ids))
+        deliveries = {}
+        for row in cur.fetchall():
+            pid, status, qty = row
+            if pid not in deliveries:
+                deliveries[pid] = {'planned': 0, 'shipped': 0}
+            deliveries[pid][status] += qty
+
+    # Получаем перемещения в пути
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ti.product_id, c.name as from_city, t.arriving_at, SUM(ti.quantity) as qty
+            FROM inventory.transfer_items ti
+            JOIN inventory.transfers t ON ti.transfer_id = t.id
+            JOIN inventory.reserves r ON ti.reserve_id = r.id
+            JOIN catalog.warehouses w ON t.from_warehouse_id = w.id
+            JOIN catalog.cities c ON w.city_id = c.id
+            WHERE r.order_id = %s AND ti.product_id = ANY(%s)
+              AND t.status IN ('planned', 'shipping', 'in_transit')
+            GROUP BY ti.product_id, c.name, t.arriving_at
+        """, (order_id, product_ids))
+        transfers = {}
+        for row in cur.fetchall():
+            pid, from_city, arriving_at, qty = row
+            if pid not in transfers:
+                transfers[pid] = []
+            transfers[pid].append({
+                'from_city': from_city,
+                'arriving_at': arriving_at,
+                'qty': qty
+            })
+
+    inv_items = []
+    for it in items:
+        status_str = "ожидает обработки"
+        if order_status != "new":
+            # Проверяем накладную на доставку
+            del_info = deliveries.get(it.product_id)
+            if del_info:
+                if del_info.get('shipped', 0) >= it.quantity:
+                    status_str = "отгружено"
+                elif del_info.get('planned', 0) > 0 or del_info.get('shipped', 0) > 0:
+                    status_str = "запланирована отгрузка"
+
+            # Проверяем резерв
+            if status_str == "ожидает обработки":
+                res_qty = reserves.get(it.product_id, 0)
+                if res_qty >= it.quantity:
+                    status_str = "в резерве"
+
+            # Проверяем перемещения
+            if status_str == "ожидает обработки":
+                trans_info = transfers.get(it.product_id)
+                if trans_info:
+                    details = []
+                    for t in trans_info:
+                        arr = f", ожидание: {t['arriving_at']}" if t['arriving_at'] else ""
+                        details.append(f"из {t['from_city']}{arr}")
+                    status_str = "в пути (" + "; ".join(details) + ")"
+
+        inv_items.append(OrderItemInv(
+            order_id=it.order_id,
+            product_id=it.product_id,
+            product_name=it.product_name,
+            price=it.price,
+            quantity=it.quantity,
+            item_status=status_str
+        ))
+
+    return inv_items
+
+
 def _recalculate_total(order_id: int) -> None:
     """Пересчитать total_amount заказа на основе его позиций."""
     conn = get_conn()
@@ -100,8 +222,10 @@ def _render_order(order: Order) -> None:
     table.add_row("Статус", f"[bold]{order.status}[/bold]")
     table.add_row("Сумма", f"{order.total_amount:.2f}")
     table.add_row("Создан", str(order.created_at))
-    table.add_row("Склад ID", str(order.warehouse_id))
+    table.add_row("Склад отгрузки", order.warehouse_info)
     table.add_row("Создал", order.created_by_username)
+    if order.processing_by_username:
+        table.add_row("В обработке у", order.processing_by_username)
 
     panel = Panel(
         table,
@@ -112,25 +236,32 @@ def _render_order(order: Order) -> None:
     console.print(panel)
 
 
-def _render_order_items(items: list[OrderItem]) -> None:
+def _render_order_items(items: list[OrderItem] | list[OrderItemInv]) -> None:
     """Вывод позиций заказа в виде таблицы."""
     if not items:
         console.print("[yellow]В заказе нет товаров.[/yellow]")
         return
+
+    has_status = hasattr(items[0], 'item_status')
 
     table = Table(title="Позиции заказа", show_header=True, header_style="bold cyan")
     table.add_column("Товар", style="green", min_width=20)
     table.add_column("Цена", style="yellow", justify="right")
     table.add_column("Кол-во", style="magenta", justify="right")
     table.add_column("Сумма", style="bold white", justify="right")
+    if has_status:
+        table.add_column("Статус", style="cyan", min_width=20)
 
     for item in items:
-        table.add_row(
+        row = [
             item.product_name,
             f"{item.price:.2f}",
             str(item.quantity),
             f"{item.price * item.quantity:.2f}",
-        )
+        ]
+        if has_status:
+            row.append(item.item_status)
+        table.add_row(*row)
     console.print(table)
 
 
@@ -140,9 +271,14 @@ def _get_order_or_fail(order_id: str) -> Order | None:
     with conn.cursor(row_factory=class_row(Order)) as cur:
         cur.execute("""
             SELECT o.id, o.status, o.total_amount, o.created_at, o.warehouse_id, 
-                   u.username AS created_by_username
+                   u.username AS created_by_username,
+                   c.name || ', ' || w.address || COALESCE(', ' || w.label, '') AS warehouse_info,
+                   pu.username AS processing_by_username
             FROM sales.orders o
             JOIN auth.users u ON o.created_by = u.id
+            JOIN catalog.warehouses w ON o.warehouse_id = w.id
+            JOIN catalog.cities c ON w.city_id = c.id
+            LEFT JOIN auth.users pu ON o.processing_by = pu.id
             WHERE o.id = %s
         """, (order_id,))
         order: Order | None = cur.fetchone()
@@ -185,7 +321,12 @@ def _prompt_warehouse_choice(default_warehouse_id: int | None = None) -> int | N
     """Интерактивный выбор склада."""
     conn = get_conn()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, city, address, label, is_central FROM catalog.warehouses ORDER BY id")
+        cur.execute("""
+            SELECT w.id, c.name, w.address, w.label, w.is_central 
+            FROM catalog.warehouses w
+            JOIN catalog.cities c ON w.city_id = c.id
+            ORDER BY w.id
+        """)
         warehouses = cur.fetchall()
 
     if not warehouses:
@@ -252,6 +393,7 @@ def _add_items_interactively(order_id: int) -> None:
         if not YesNoValidator.is_yes(more):
             break
 
+
 @command("list orders", "список всех заказов", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def list_orders() -> None:
     conn = get_conn()
@@ -261,15 +403,20 @@ def list_orders() -> None:
     table.add_column("Статус", style="magenta", min_width=15)
     table.add_column("Сумма", style="yellow", justify="right")
     table.add_column("Создан", style="green", min_width=20)
-    table.add_column("Склад ID", style="white", justify="right")
+    table.add_column("Склад", style="white", min_width=20)
     table.add_column("Создал", style="cyan", min_width=15)
 
     with conn.cursor(row_factory=class_row(Order)) as cur:
         cur.execute("""
             SELECT o.id, o.status, o.total_amount, o.created_at, o.warehouse_id, 
-                   u.username AS created_by_username
+                   u.username AS created_by_username,
+                   c.name || ', ' || w.address || COALESCE(', ' || w.label, '') AS warehouse_info,
+                   pu.username AS processing_by_username
             FROM sales.orders o
             JOIN auth.users u ON o.created_by = u.id
+            JOIN catalog.warehouses w ON o.warehouse_id = w.id
+            JOIN catalog.cities c ON w.city_id = c.id
+            LEFT JOIN auth.users pu ON o.processing_by = pu.id
             ORDER BY o.id
         """)
         orders: list[Order] = cur.fetchall()
@@ -280,20 +427,25 @@ def list_orders() -> None:
             o.status,
             f"{o.total_amount:.2f}",
             str(o.created_at),
-            str(o.warehouse_id),
+            o.warehouse_info,
             o.created_by_username,
         )
     console.print(table)
 
 
-@command("show order", "информация о заказе", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
+@command("show order", "информация о заказе", CATEGORY_ORDERS, [ROLE_SALES_MANAGER, ROLE_INVENTORY_MANAGER])
 def show_order(order_id: str) -> None:
     order = _get_order_or_fail(order_id)
     if order is None:
         return
 
     _render_order(order)
-    items = _get_order_items(int(order_id))
+
+    if auth_user().role == ROLE_INVENTORY_MANAGER:
+        items = _get_order_items_inv(int(order_id), order.status, order.warehouse_id)
+    else:
+        items = _get_order_items(int(order_id))
+
     _render_order_items(items)
 
 
@@ -461,6 +613,7 @@ def edit_order_item(order_id: str) -> None:
     _recalculate_total(int(order_id))
     console.print(f"[green]Позиция '{item.product_name}' обновлена: количество = {new_quantity}.[/green]")
 
+
 @command("delete order_item", "удалить позицию из заказа", CATEGORY_ORDERS, [ROLE_SALES_MANAGER])
 def delete_order_item(order_id: str) -> None:
     order = _get_order_or_fail(order_id)
@@ -485,3 +638,101 @@ def delete_order_item(order_id: str) -> None:
         )
         _recalculate_total(int(order_id))
         console.print(f"[green]Позиция '{item.product_name}' удалена.[/green]")
+
+
+# =========================================
+# Команды для inventory_manager (Задание 6)
+# =========================================
+
+def _list_orders(status: str | None = None, my: bool = False) -> None:
+    """Вспомогательная функция для вывода списка заказов с фильтрами."""
+    conn = get_conn()
+    query = """
+        SELECT o.id, o.status, o.total_amount, o.created_at, o.warehouse_id, 
+               u.username AS created_by_username,
+               c.name || ', ' || w.address || COALESCE(', ' || w.label, '') AS warehouse_info,
+               pu.username AS processing_by_username
+        FROM sales.orders o
+        JOIN auth.users u ON o.created_by = u.id
+        JOIN catalog.warehouses w ON o.warehouse_id = w.id
+        JOIN catalog.cities c ON w.city_id = c.id
+        LEFT JOIN auth.users pu ON o.processing_by = pu.id
+        WHERE 1=1
+    """
+    params = []
+    if status:
+        query += " AND o.status = %s"
+        params.append(status)
+    if my:
+        query += " AND o.processing_by = %s"
+        params.append(auth_user().id)
+
+    query += " ORDER BY o.id"
+
+    with conn.cursor(row_factory=class_row(Order)) as cur:
+        cur.execute(query, params)
+        orders: list[Order] = cur.fetchall()
+
+    table = Table(title="Заказы", show_header=True, header_style="bold cyan")
+    table.add_column("ID", style="dim", width=6, justify="right")
+    table.add_column("Статус", style="magenta", min_width=5)
+    table.add_column("Сумма", style="yellow", justify="right")
+    table.add_column("Создан", style="green", min_width=20)
+    table.add_column("Склад", style="white", min_width=20)
+    table.add_column("Создал", style="cyan", min_width=15)
+    table.add_column("В обработке у", style="bold cyan", min_width=15)
+
+    for o in orders:
+        table.add_row(
+            str(o.id),
+            o.status,
+            f"{o.total_amount:.2f}",
+            str(o.created_at),
+            o.warehouse_info,
+            o.created_by_username,
+            o.processing_by_username or "-",
+        )
+    console.print(table)
+
+
+@command("list orders new", "список новых заказов", CATEGORY_ORDERS, [ROLE_INVENTORY_MANAGER])
+def list_orders_new() -> None:
+    _list_orders(status="new")
+
+
+@command("list orders processing", "список заказов в обработке", CATEGORY_ORDERS, [ROLE_INVENTORY_MANAGER])
+def list_orders_processing() -> None:
+    _list_orders(status="processing")
+
+
+@command("list orders my", "список моих заказов", CATEGORY_ORDERS, [ROLE_INVENTORY_MANAGER])
+def list_orders_my() -> None:
+    _list_orders(my=True)
+
+
+@command("mark order processing", "взять заказ в обработку", CATEGORY_ORDERS, [ROLE_INVENTORY_MANAGER])
+def mark_order_processing(order_id: str) -> None:
+    if not order_id.isdigit():
+        render_error("ID заказа должен быть числом.")
+        return
+
+    order = _get_order_or_fail(order_id)
+    if order is None:
+        return
+
+    if order.status != "new":
+        render_error(
+            f"Заказ #{order_id} имеет статус '{order.status}'. Взять в обработку можно только заказы со статусом 'new'.")
+        return
+
+    _render_order(order)
+    _render_order_items(_get_order_items(int(order_id)))
+
+    answer = prompt("Взять этот заказ в обработку? (y/n, д/н): ", validator=YesNoValidator()).strip()
+    if YesNoValidator.is_yes(answer):
+        conn = get_conn()
+        conn.execute(
+            "UPDATE sales.orders SET status = 'processing', processing_by = %s WHERE id = %s",
+            (auth_user().id, order_id)
+        )
+        console.print(f"[green]Заказ #{order_id} взят в обработку.[/green]")
