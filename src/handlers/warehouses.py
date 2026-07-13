@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from prompt_toolkit import prompt
+from prompt_toolkit.shortcuts import choice
 from prompt_toolkit.completion import WordCompleter
 from psycopg.rows import class_row
 from rich.panel import Panel
@@ -10,30 +11,15 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator
 from commands import command, CATEGORY_WAREHOUSES
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ROLE_INVENTORY_MANAGER
 
-cities = [
-    "Москва",
-    "Санкт-Петербург",
-    "Новосибирск",
-    "Екатеринбург",
-    "Казань",
-    "Нижний Новгород",
-    "Челябинск",
-    "Самара",
-    "Омск",
-    "Ростов-на-Дону",
-    "Уфа",
-    "Красноярск",
-    "Воронеж",
-    "Пермь",
-    "Волгоград",
-]
 
-city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
-city_validator = ChoiceValidator(
-    cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
-)
+def get_cities() -> list[str]:
+    """Получает список городов из базы данных."""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM catalog.cities ORDER BY name")
+        return [row[0] for row in cur.fetchall()]
 
 
 @dataclass
@@ -105,14 +91,16 @@ def show_warehouse(_id: str) -> None:
 
     _render_warehouse(warehouse)
 
+
 def isCentralWarehouseExists() -> bool:
     conn = get_conn()
     with conn.cursor(row_factory=class_row(Warehouse)) as cur:
-        cur.execute("SELECT * FROM catalog.warehouses")
+        cur.execute("SELECT * FROM catalog.warehouses WHERE is_central = True")
         warehouse: Warehouse | None = cur.fetchone()
     if warehouse is None:
         return False
     return True
+
 
 def isCentralWarehouseExistsWithDifferentId(_id: str) -> bool:
     conn = get_conn()
@@ -123,19 +111,27 @@ def isCentralWarehouseExistsWithDifferentId(_id: str) -> bool:
         return False
     return True
 
+
 @command("add warehouse", "добавить склад (интерактивно)", CATEGORY_WAREHOUSES, [ROLE_CATALOG_MANAGER])
 def add_warehouse() -> None:
     conn = get_conn()
 
+    cities = get_cities()
+    city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
+    city_validator = ChoiceValidator(
+        cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
+    )
+
     city = prompt("Город: ", validator=city_validator, completer=city_completer).strip()
     address = prompt("Адрес: ", validator=NonEmptyValidator()).strip()
     label = prompt("Метка (необязательно): ").strip() or None
+
     is_central = True
     is_need_change_central_warehouse = False
     if isCentralWarehouseExists():
         is_central = YesNoValidator.is_yes(prompt("Центральный склад уже существует. Сделать новый склад центральным? ",
-                            validator=YesNoValidator())
-                      .strip())
+                                                  validator=YesNoValidator())
+                                           .strip())
         is_need_change_central_warehouse = is_central
 
     if is_need_change_central_warehouse:
@@ -159,6 +155,12 @@ def add_warehouse() -> None:
 @command("edit warehouse", "редактировать склад", CATEGORY_WAREHOUSES, [ROLE_CATALOG_MANAGER])
 def edit_warehouse(_id: str) -> None:
     conn = get_conn()
+
+    cities = get_cities()
+    city_completer = WordCompleter(cities, ignore_case=True, sentence=True)
+    city_validator = ChoiceValidator(
+        cities, message="Город должен быть из списка. Используйте Tab для автодополнения."
+    )
 
     with conn.cursor(row_factory=class_row(Warehouse)) as cur:
         cur.execute("SELECT * FROM catalog.warehouses WHERE id = %s", (_id,))
@@ -252,3 +254,80 @@ def delete_warehouse(_id: str) -> None:
             )
         else:
             console.print(f"[green]Склад в городе {warehouse.city} удален [/green]")
+
+def _prompt_warehouse_choice(default_warehouse_id: int | None = None) -> int | None:
+    """Интерактивный выбор склада."""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT w.id, c.name, w.address, w.label, w.is_central 
+            FROM catalog.warehouses w
+            JOIN catalog.cities c ON w.city_id = c.id
+            ORDER BY w.id
+        """)
+        warehouses = cur.fetchall()
+
+    if not warehouses:
+        render_error("Нет доступных складов. Сначала создайте хотя бы один склад.")
+        return None
+
+    options = []
+    central_wh_id = None
+    for w in warehouses:
+        label = f"{w[0]} | {w[1]} | {w[2]}"
+        if w[3]:
+            label += f" | {w[3]}"
+        if w[4]:
+            label += " (Центральный)"
+            central_wh_id = w[0]
+        options.append((w[0], label))
+
+    if default_warehouse_id is None:
+        default_warehouse_id = central_wh_id if central_wh_id is not None else warehouses[0][0]
+    elif default_warehouse_id not in [w[0] for w in warehouses]:
+        default_warehouse_id = warehouses[0][0]
+
+    selected_wh_id = choice(
+        message="Выберите склад:",
+        options=options,
+        default=default_warehouse_id,
+    )
+    return selected_wh_id
+
+@command("view warehouse stock", "остатки по складу", CATEGORY_WAREHOUSES, [ROLE_INVENTORY_MANAGER])
+def view_warehouse_stock() -> None:
+    warehouse_id = _prompt_warehouse_choice()
+    if warehouse_id is None:
+        return
+
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("""
+             SELECT p.name, p.sku,
+                    COALESCE(st.quantity, 0) AS stock_qty,
+                    COALESCE(res.quantity, 0) AS reserve_qty,
+                    COALESCE(st.quantity, 0) + COALESCE(res.quantity, 0) AS total
+             FROM catalog.products p
+             LEFT JOIN inventory.stock st ON st.product_id = p.id AND st.warehouse_id = %s
+             LEFT JOIN (
+                 SELECT product_id, SUM(quantity) as quantity
+                 FROM inventory.reserves
+                 WHERE warehouse_id = %s
+                 GROUP BY product_id
+             ) res ON res.product_id = p.id
+             ORDER BY p.name
+         """, (warehouse_id, warehouse_id))
+        rows = cur.fetchall()
+
+    table = Table(title=f"Остатки на складе #{warehouse_id}", show_header=True, header_style="bold cyan")
+    table.add_column("Товар", style="green", min_width=20)
+    table.add_column("Артикул", style="dim", min_width=10)
+    table.add_column("Сток", style="yellow", justify="right")
+    table.add_column("Резерв", style="magenta", justify="right")
+    table.add_column("Всего", style="bold white", justify="right")
+
+    for row in rows:
+        name, sku, stock, reserve, total = row
+        table.add_row(name, sku, str(stock), str(reserve), str(total))
+
+    console.print(table)
