@@ -16,7 +16,8 @@ from console import console, render_error
 from db import get_conn
 from validators import ChoiceValidator, NonEmptyValidator, YesNoValidator, PriceValidator
 from commands import command, CATEGORY_WAREHOUSES
-from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ALL_ROLES
+from auth import ROLE_SALES_MANAGER, ROLE_CATALOG_MANAGER, ALL_ROLES, ROLE_INVENTORY_MANAGER
+from prompt_toolkit.shortcuts import choice
 
 
 @dataclass
@@ -266,3 +267,50 @@ def delete_product(_id: str) -> None:
     if YesNoValidator.is_yes(answer):
         conn.execute("DELETE FROM catalog.products WHERE id = %s", (_id,))
         console.print(f"[green]Товар {product.name} (SKU: {product.sku}) удален [/green]")
+
+@command("view product stock", "остатки по продукту", CATEGORY_PRODUCTS, [ROLE_INVENTORY_MANAGER])
+def view_product_stock() -> None:
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, sku, name FROM catalog.products ORDER BY name")
+        products = cur.fetchall()
+
+    if not products:
+        render_error("Каталог пуст.")
+        return
+
+    options = [(p[0], f"{p[2]} ({p[1]})") for p in products]
+    selected_id = choice(message="Выберите продукт:", options=options)
+
+    product_name = next(p[2] for p in products if p[0] == selected_id)
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT c.name || ', ' || w.address || COALESCE(', ' || w.label, '') AS wh_info,
+                   COALESCE(st.quantity, 0) AS stock_qty,
+                   COALESCE(res.quantity, 0) AS reserve_qty,
+                   COALESCE(st.quantity, 0) + COALESCE(res.quantity, 0) AS total
+            FROM catalog.warehouses w
+            JOIN catalog.cities c ON w.city_id = c.id
+            LEFT JOIN inventory.stock st ON st.warehouse_id = w.id AND st.product_id = %s
+            LEFT JOIN (
+                SELECT warehouse_id, SUM(quantity) as quantity
+                FROM inventory.reserves
+                WHERE product_id = %s
+                GROUP BY warehouse_id
+            ) res ON res.warehouse_id = w.id
+            ORDER BY stock_qty DESC
+        """, (selected_id, selected_id))
+        rows = cur.fetchall()
+
+    table = Table(title=f"Остатки продукта '{product_name}' по складам", show_header=True, header_style="bold cyan")
+    table.add_column("Склад", style="green", min_width=30)
+    table.add_column("Сток", style="yellow", justify="right")
+    table.add_column("Резерв", style="magenta", justify="right")
+    table.add_column("Всего", style="bold white", justify="right")
+
+    for row in rows:
+        wh_info, stock, reserve, total = row
+        table.add_row(wh_info, str(stock), str(reserve), str(total))
+
+    console.print(table)
